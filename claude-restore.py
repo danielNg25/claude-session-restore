@@ -91,6 +91,23 @@ def title(s):
     return t[:70] + ('…' if len(t) > 70 else '')
 
 
+def launch_cwd(s):
+    """thư mục mở phiên lấy từ transcript (đúng nhất); không có thì dùng cwd đã lưu"""
+    p = s.get('transcript')
+    try:
+        with open(p, encoding='utf-8', errors='ignore') as f:
+            for i, line in enumerate(f):
+                if i > 200:
+                    break
+                if '"cwd"' in line:
+                    c = json.loads(line).get('cwd')
+                    if c:
+                        return c
+    except Exception:
+        pass
+    return s.get('cwd', '')
+
+
 def load():
     try:
         with open(REG, encoding='utf-8') as f:
@@ -151,6 +168,8 @@ def main():
     reg = load()
     rows = sorted(reg.values(), key=lambda s: s.get('t', ''), reverse=True)
     todo = [s for s in rows if not alive(s.get('pid'))]
+    for s in todo:
+        s['cwd'] = launch_cwd(s)
     if '--forget' in a:
         idx = {int(x) for x in a[a.index('--forget') + 1].split(',') if x.strip().isdigit()}
         for i, s in enumerate(todo, 1):

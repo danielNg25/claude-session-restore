@@ -2,13 +2,44 @@
 """Ghi các phiên Claude Code đang mở vào ~/.claude/open-sessions.json để claude-restore mở lại sau khi tắt máy.
 Chạy từ hook:  session-registry.py start  (SessionStart)  |  session-registry.py end  (SessionEnd)
 - start: thêm/cập nhật phiên. Trên Mac/Linux bỏ qua phiên không có terminal (claude -p, --bg).
-- end:   xoá phiên (thoát bình thường). Tắt máy đột ngột thì không có end -> phiên còn lại = cần mở lại.
+- end:   chỉ xoá phiên khi thoát có chủ ý (/exit, Ctrl+D, /clear, logout). Đóng cửa sổ terminal, tắt máy ngang
+         -> phiên vẫn còn trong danh sách = cần mở lại.
+- cwd lưu là thư mục MỞ phiên (nơi `claude --resume` tìm được phiên), không phải thư mục Claude đã cd tới.
+Mỗi lần chạy ghi một dòng vào ~/.claude/open-sessions.log để dò lỗi.
 Không bao giờ làm hỏng phiên: mọi lỗi đều bị bỏ qua, luôn thoát 0. Chạy được trên macOS, Linux, Windows.
 """
 import json, os, subprocess, sys, time
 
 WIN = os.name == 'nt'
 REG = os.path.join(os.path.expanduser('~'), '.claude', 'open-sessions.json')
+LOG = REG[:-5] + '.log'
+DELIBERATE = {'prompt_input_exit', 'clear', 'logout', 'resume'}   # /exit, Ctrl+D, /clear, /logout, /resume sang phiên khác; đóng cửa sổ = 'other' → giữ
+
+
+def log(msg):
+    try:
+        if os.path.exists(LOG) and os.path.getsize(LOG) > 200_000:
+            os.replace(LOG, LOG + '.1')
+        with open(LOG, 'a', encoding='utf-8') as f:
+            f.write(time.strftime('%Y-%m-%d %H:%M:%S ') + msg + '\n')
+    except Exception:
+        pass
+
+
+def launch_cwd(transcript):
+    """thư mục mở phiên = cwd ở dòng đầu của transcript"""
+    try:
+        with open(transcript, encoding='utf-8', errors='ignore') as f:
+            for i, line in enumerate(f):
+                if i > 200:
+                    break
+                if '"cwd"' in line:
+                    c = json.loads(line).get('cwd')
+                    if c:
+                        return c
+    except Exception:
+        pass
+    return None
 
 
 def win_procs():
@@ -124,15 +155,29 @@ def main():
             reg = {}
         if mode == 'start':
             pid = claude_pid()
+            src = data.get('source', '')
             if not pid or not has_terminal(pid):
+                log(f'start {sid[:8]} {src} bỏ qua (pid={pid}, không có terminal)')
                 return
             old = reg.get(sid, {})
             now = time.strftime('%Y-%m-%d %H:%M')
-            reg[sid] = {'id': sid, 'cwd': data.get('cwd') or os.getcwd(), 'pid': pid,
-                        'source': data.get('source', ''), 'first': old.get('first') or now,
-                        't': now, 'transcript': data.get('transcript_path', '')}
+            tr = data.get('transcript_path', '')
+            cwd = old.get('cwd') or (data.get('cwd') if src in ('startup', 'resume') else None) \
+                or launch_cwd(tr) or data.get('cwd') or os.getcwd()
+            reg[sid] = {'id': sid, 'cwd': cwd, 'pid': pid, 'source': src,
+                        'first': old.get('first') or now, 't': now, 'transcript': tr}
+            log(f'start {sid[:8]} {src} pid={pid} cwd={cwd}')
         else:
-            reg.pop(sid, None)
+            reason = data.get('reason', '')
+            if reason in DELIBERATE:
+                reg.pop(sid, None)
+                log(f'end {sid[:8]} {reason}: xoá khỏi danh sách')
+            else:
+                if sid in reg:
+                    reg[sid]['closed'] = reason or 'unknown'
+                log(f'end {sid[:8]} {reason or "?"}: giữ lại để mở lại')
+        cutoff = time.strftime('%Y-%m-%d', time.localtime(time.time() - 14 * 86400))
+        reg = {k: v for k, v in reg.items() if v.get('t', '9') >= cutoff}   # bỏ phiên quá 14 ngày
         tmp = REG + '.tmp'
         with open(tmp, 'w', encoding='utf-8') as f:
             json.dump(reg, f, ensure_ascii=False, indent=1)
